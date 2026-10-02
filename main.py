@@ -21,8 +21,7 @@ app.add_middleware(
 
 # 2. إعداد client الـ OpenAI (بيقرأ المفتاح تلقائياً من الـ Environment Variables)
 # تأكد من إضافة OPENAI_API_KEY في إعدادات Environment Variables على Render
-openai_client = OpenAI(api_key=os.environ.get("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"))
-
+openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
 class QuestionRequest(BaseModel):
     player_text: str
 
