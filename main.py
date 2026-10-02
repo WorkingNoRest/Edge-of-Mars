@@ -5,10 +5,11 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from openai import OpenAI
+from google import genai
+import speech_recognition as sr
 from gtts import gTTS
 
-app = FastAPI(title="NASA AI NPC Backend")
+app = FastAPI(title="NASA AI NPC Backend (Gemini Edition)")
 
 # 1. إعدادات CORS للسماح لاتصالات Unity
 app.add_middleware(
@@ -19,9 +20,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# 2. إعداد client الـ OpenAI (بيقرأ المفتاح تلقائياً من الـ Environment Variables)
-# تأكد من إضافة OPENAI_API_KEY في إعدادات Environment Variables على Render
-openai_client = OpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# 2. إعداد Gemini Client
+# يقرأ المفتاح تلقائياً من المتغير GEMINI_API_KEY على Render
+gemini_client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
 class QuestionRequest(BaseModel):
     player_text: str
 
@@ -44,29 +46,51 @@ def fetch_nasa_data(query: str) -> str:
             
             if descriptions:
                 combined = " ".join(descriptions)
-                return combined[:400]
+                return combined[:500]
     except Exception as e:
         print(f"NASA API Error: {e}")
         
     return "No direct NASA records found for this query."
 
-# 4. دالة توليد إجابة الـ NPC (يمكنك ربط GPT-3.5/GPT-4 بدلاً من هذا السطر مستقبلاً)
-def generate_npc_response(question: str, nasa_context: str) -> str:
-    clean_question = question.strip()
-    
-    if "No direct NASA records" in nasa_context:
-        answer = f"I checked our space database regarding '{clean_question}', but found no detailed records. Keep exploring, astronaut!"
-    else:
-        answer = f"According to NASA data about '{clean_question}': {nasa_context[:180]}... Safe travels out there!"
-        
-    return answer
+# 4. دالة تحويل الصوت إلى نص (STT) باستخدام SpeechRecognition الخفيفة جداً على الـ RAM
+def transcribe_audio_file(file_path: str) -> str:
+    recognizer = sr.Recognizer()
+    try:
+        with sr.AudioFile(file_path) as source:
+            audio_data = recognizer.record(source)
+            text = recognizer.recognize_google(audio_data)
+            return text
+    except Exception as e:
+        print(f"Speech Recognition Error: {e}")
+        return ""
 
-# 5. Endpoint الاختبار
+# 5. دالة توليد إجابة الـ NPC باستخدام Gemini 2.5 Flash
+def generate_npc_response_with_gemini(question: str, nasa_context: str) -> str:
+    prompt = f"""
+    You are an expert Astronaut AI NPC on a space mission.
+    Answer the player's question concise and naturally in-character (maximum 3 sentences).
+    Use the provided NASA Open Data context to formulate your response if relevant.
+
+    NASA Data Context: {nasa_context}
+    Player Question: {question}
+    """
+    
+    try:
+        response = gemini_client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+        )
+        return response.text.strip()
+    except Exception as e:
+        print(f"Gemini API Error: {e}")
+        return f"Astronaut log update regarding {question}: Signal interrupted, but keep exploring space!"
+
+# 6. Endpoint الاختبار
 @app.get("/")
 def home():
-    return {"status": "NASA AI NPC Backend is running efficiently!"}
+    return {"status": "NASA AI NPC Backend (Gemini) is online and ready!"}
 
-# 6. Endpoint المعالجة الصوتية بـ Whisper API
+# 7. Endpoint المعالجة الصوتية الكاملة
 @app.post("/ask_npc_voice")
 async def ask_npc_voice(file: UploadFile = File(...)):
     temp_wav = f"temp_{file.filename}"
@@ -76,29 +100,26 @@ async def ask_npc_voice(file: UploadFile = File(...)):
         with open(temp_wav, "wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
             
-        # ب) تحويل الصوت إلى نص عبر OpenAI Whisper API (بدون استهلاك RAM السيرفر)
-        with open(temp_wav, "rb") as audio_file:
-            transcript = openai_client.audio.transcriptions.create(
-                model="whisper-1",
-                file=audio_file
-            )
-        
-        player_text = transcript.text.strip()
-        print(f"🎙️ Transcribed via Whisper API: '{player_text}'")
+        # ب) تحويل الصوت إلى نص (STT)
+        player_text = transcribe_audio_file(temp_wav)
+        print(f"🎙️ Transcribed Player Speech: '{player_text}'")
         
         if not player_text:
             player_text = "space exploration"
 
-        # ج) جلب بيانات NASA وتوليد الإجابة
+        # ج) جلب بيانات NASA
         nasa_info = fetch_nasa_data(player_text)
-        ai_answer = generate_npc_response(player_text, nasa_info)
         
-        # د) تحويل النص المرتجع إلى صوت MP3
+        # د) توليد الإجابة الذكية باستخدام Gemini API
+        ai_answer = generate_npc_response_with_gemini(player_text, nasa_info)
+        print(f"🤖 Gemini NPC Answer: '{ai_answer}'")
+        
+        # هـ) تحويل الإجابة إلى صوت MP3 عبر gTTS
         output_audio_path = "npc_response.mp3"
         tts = gTTS(text=ai_answer, lang='en')
         tts.save(output_audio_path)
         
-        # هـ) إرجاع الملف لـ Unity
+        # و) إرجاع ملف الصوت لـ Unity
         return FileResponse(
             output_audio_path, 
             media_type="audio/mpeg", 
@@ -106,10 +127,10 @@ async def ask_npc_voice(file: UploadFile = File(...)):
         )
 
     except Exception as e:
-        print(f"❌ Error processing request: {e}")
+        print(f"❌ Error in ask_npc_voice: {e}")
         raise HTTPException(status_code=500, detail=str(e))
         
     finally:
-        # تنظيف الملفات المؤقتة
+        # تنظيف الملف المؤقت
         if os.path.exists(temp_wav):
             os.remove(temp_wav)
